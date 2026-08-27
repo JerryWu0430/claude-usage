@@ -5,6 +5,9 @@ import { spawn } from 'node:child_process';
 import { analyze, suggestions as suggestFrom, DEFAULTS } from '../src/analyze.js';
 import { renderReport, renderPrune, setColor } from '../src/term.js';
 import { renderHtml } from '../src/html.js';
+import { pickItems } from '../src/select.js';
+import { removeItem } from '../src/remove.js';
+import { compact } from '../src/format.js';
 
 const KINDS = ['skill', 'command', 'mcp', 'plugin', 'agent'];
 const ALIASES = {
@@ -19,9 +22,17 @@ const HELP = `claude-usage — audit which Claude Code skills, commands, plugins
 
 USAGE
   claude-usage [kinds...] [options]
+  claude-usage clean [kinds...] [options]
 
 KINDS
   skills  commands  mcp  plugins  agents        (default: all)
+
+CLEAN
+  clean             pick what to uninstall interactively, then remove it
+                    ↑↓/jk move · space toggle · a all · n none · enter confirm · q cancel
+                    click and scroll work too; drop-verdict items start selected
+  --dry-run         with clean: show what would run, change nothing
+  --yes             with clean: skip the final confirmation
 
 OPTIONS
   --html [file]     write an HTML dashboard (default ./claude-usage.html) and open it
@@ -39,13 +50,16 @@ OPTIONS
 
 EXAMPLES
   claude-usage                     full audit, newest suggestions first
+  claude-usage clean               pick and uninstall interactively
+  claude-usage clean plugins mcp   only offer servers and plugins
   claude-usage mcp plugins         just servers and plugins
   claude-usage --html              open the dashboard
-  claude-usage --prune > clean.sh  review, then run it`;
+  claude-usage --prune > clean.sh  script instead of the picker`;
 
 function parseArgs(argv) {
   const opts = {
-    kinds: [], html: null, json: false, prune: false, all: false,
+    kinds: [], html: null, json: false, prune: false, all: false, clean: false,
+    dryRun: false, yes: false,
     sort: 'verdict', color: process.stdout.isTTY && !process.env.NO_COLOR, noCache: false,
     thresholds: {},
   };
@@ -57,6 +71,9 @@ function parseArgs(argv) {
     else if (arg === '--json') opts.json = true;
     else if (arg === '--prune') opts.prune = true;
     else if (arg === '--all') opts.all = true;
+    else if (arg === '--dry-run') opts.dryRun = true;
+    else if (arg === '--yes' || arg === '-y') opts.yes = true;
+    else if (arg === 'clean') opts.clean = true;
     else if (arg === '--no-cache') opts.noCache = true;
     else if (arg === '--no-color') opts.color = false;
     else if (arg === '--sort') opts.sort = next();
@@ -100,6 +117,73 @@ function openFile(file) {
   }
 }
 
+const VERDICT_RANK = { drop: 0, review: 1, new: 2, keep: 3 };
+
+/** Ask once on the real screen, so the record of what ran stays in scrollback. */
+async function confirm(question) {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(question);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+async function runClean(result, opts) {
+  const candidates = result.items
+    .filter((i) => opts.kinds.includes(i.kind) && i.removable && i.installed)
+    .sort(
+      (a, b) =>
+        VERDICT_RANK[a.verdict] - VERDICT_RANK[b.verdict] ||
+        (b.contextCost || 0) - (a.contextCost || 0) ||
+        a.display.localeCompare(b.display)
+    );
+
+  if (!candidates.length) {
+    console.log('Nothing removable found — everything installed is either in use or managed elsewhere.');
+    return;
+  }
+
+  const chosen = await pickItems(candidates, { preselect: (item) => item.verdict === 'drop' });
+  if (chosen === null) {
+    console.log('Cancelled — nothing was removed.');
+    return;
+  }
+  if (!chosen.length) {
+    console.log('Nothing selected — nothing was removed.');
+    return;
+  }
+
+  const tokens = chosen.reduce((sum, i) => sum + (i.contextCost || 0), 0);
+  console.log(`\n${chosen.length} to remove${tokens ? ` · ~${compact(tokens)} tokens of context reclaimed` : ''}:\n`);
+  for (const item of chosen) console.log(`  ${item.kind} ${item.display}\n    ${item.removeCmd}`);
+
+  if (opts.dryRun) {
+    console.log('\n--dry-run: nothing was changed.');
+    return;
+  }
+  if (!opts.yes && !(await confirm(`\nRemove these ${chosen.length} items? [y/N] `))) {
+    console.log('Cancelled — nothing was removed.');
+    return;
+  }
+
+  console.log('');
+  let failed = 0;
+  for (const item of chosen) {
+    const outcome = removeItem(item);
+    if (outcome.ok) {
+      console.log(`  ✓ ${item.kind} ${item.display}${outcome.note ? ` (${outcome.note})` : ''}`);
+    } else {
+      failed++;
+      console.log(`  ✗ ${item.kind} ${item.display} — ${outcome.error}`);
+    }
+  }
+  console.log(`\n${chosen.length - failed} removed${failed ? `, ${failed} failed` : ''}.`);
+  if (failed) process.exitCode = 1;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) return console.log(HELP);
@@ -113,12 +197,19 @@ async function main() {
     return console.log(pkg.version);
   }
 
+  if (opts.clean && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    console.error('claude-usage: `clean` needs an interactive terminal. Use --prune for a script.');
+    process.exitCode = 2;
+    return;
+  }
+
   setColor(opts.color);
   const result = await analyze({ ...opts.thresholds, noCache: opts.noCache, onProgress: progress(20) });
   const inKinds = result.items.filter((i) => opts.kinds.includes(i.kind));
   const suggestions = suggestFrom(inKinds);
   const view = { kinds: opts.kinds, sort: opts.sort, showAll: opts.all, suggestions };
 
+  if (opts.clean) return runClean(result, opts);
   if (opts.json) {
     console.log(JSON.stringify({ generatedAt: result.now, transcripts: result.fileCount, items: inKinds, suggestions }, null, 2));
     return;

@@ -30,6 +30,7 @@ export function collectInventory() {
       version: install.version,
       removable: true,
       removeCmd: `claude plugin uninstall ${shellQuote(id)}`,
+      removeAction: { type: 'exec', cmd: 'claude', args: ['plugin', 'uninstall', id] },
     });
     for (const it of pluginContents(short, install)) add(it);
   }
@@ -64,6 +65,7 @@ function userSkills() {
       removable: true,
       linkedFrom: target,
       removeCmd: target ? `rm ${shellQuote(dir)}` : `rm -rf ${shellQuote(dir)}`,
+      removeAction: { type: target ? 'unlink' : 'rmdir', path: dir },
     });
     if (skill) out.push(skill);
   }
@@ -77,6 +79,7 @@ function userCommands() {
     scope: 'user',
     removable: true,
     removeCmd: `rm ${shellQuote(c.file)}`,
+    removeAction: { type: 'unlink', path: c.file },
   }));
 }
 
@@ -94,6 +97,7 @@ function userAgents() {
       installedAt: createdAt(file),
       removable: true,
       removeCmd: `rm ${shellQuote(file)}`,
+      removeAction: { type: 'unlink', path: file },
     });
   }
   return out;
@@ -173,6 +177,7 @@ function mcpServers() {
       installedAt: null,
       removable: true,
       removeCmd: `claude mcp remove ${shellQuote(name)} -s user`,
+      removeAction: { type: 'exec', cmd: 'claude', args: ['mcp', 'remove', name, '-s', 'user'] },
     });
   }
 
@@ -181,7 +186,13 @@ function mcpServers() {
       push(name, 'project', {
         installedAt: null,
         removable: true,
-        removeCmd: `claude mcp remove ${shellQuote(name)} -s local`,
+        removeCmd: `cd ${shellQuote(projectPath)} && claude mcp remove ${shellQuote(name)} -s local`,
+        removeAction: {
+          type: 'exec',
+          cmd: 'claude',
+          args: ['mcp', 'remove', name, '-s', 'local'],
+          cwd: projectPath,
+        },
         projectPath,
       });
     }
