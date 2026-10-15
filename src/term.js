@@ -129,7 +129,7 @@ export function renderReport({ items, now, fileCount, windowDays }, { kinds, sor
 
   for (const kind of kinds) {
     let group = items.filter((i) => i.kind === kind);
-    if (!showAll) group = group.filter((i) => i.removable || i.count > 0);
+    if (!showAll) group = group.filter((i) => i.removable || i.connected || i.count > 0);
     out.push(section(KIND_LABEL[kind] || kind.toUpperCase(), sortItems(group, sort), now));
   }
 

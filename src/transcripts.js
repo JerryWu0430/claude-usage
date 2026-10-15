@@ -3,7 +3,10 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { CACHE_FILE, PROJECTS_DIR, listDir, readJson } from './config.js';
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
+
+/** Tools an unauthenticated claude.ai connector exposes — and nothing else. */
+const AUTH_TOOLS = new Set(['authenticate', 'complete_authentication']);
 
 /** Slash commands the CLI ships with — usable data, but nothing to uninstall. */
 const BUILTIN_COMMANDS = new Set([
@@ -45,9 +48,39 @@ export function normalizeMcpServer(server) {
   return { name: server, origin: 'local' };
 }
 
+/**
+ * Fold one `deferred_tools_delta` attachment into the set of tool names a
+ * session was offered. Every session announces its full tool list this way,
+ * including connectors that were never called.
+ */
+export function applyToolDelta(names, delta) {
+  for (const name of delta.removedNames || []) names.delete(name);
+  for (const key of ['addedNames', 'readdedNames', 'surfacedNames']) {
+    for (const name of delta[key] || []) names.add(name);
+  }
+  return names;
+}
+
+/** Announced tool names -> `{ Canva: { tools, chars, authed } }` for claude.ai connectors only. */
+export function connectorSnapshot(names) {
+  const servers = {};
+  for (const full of names) {
+    if (!full.startsWith('mcp__')) continue;
+    const { server, tool } = parseMcpToolName(full);
+    const { name, origin } = normalizeMcpServer(server);
+    if (origin !== 'connector') continue;
+    const entry = (servers[name] ||= { tools: 0, chars: 0, authed: false });
+    entry.tools += 1;
+    entry.chars += full.length;
+    if (!AUTH_TOOLS.has(tool)) entry.authed = true;
+  }
+  return servers;
+}
+
 /** Sessions sit at `projects/<project>/*.jsonl`; subagent runs nest arbitrarily below that. */
 function transcriptFiles() {
   const out = [];
+  let root;
   const walk = (dir, project) => {
     for (const entry of listDir(dir)) {
       const full = path.join(dir, entry.name);
@@ -62,12 +95,13 @@ function transcriptFiles() {
       } catch {
         continue;
       }
-      out.push({ file: full, project, sig: `${Math.round(stat.mtimeMs)}:${stat.size}` });
+      out.push({ file: full, project, sig: `${Math.round(stat.mtimeMs)}:${stat.size}`, nested: dir !== root });
     }
   };
   for (const project of listDir(PROJECTS_DIR)) {
     if (!project.isDirectory()) continue;
-    walk(path.join(PROJECTS_DIR, project.name), project.name);
+    root = path.join(PROJECTS_DIR, project.name);
+    walk(root, project.name);
   }
   return out;
 }
@@ -101,10 +135,25 @@ function textOf(content) {
 
 async function scanFile(file) {
   const buckets = {};
+  const announced = new Set();
+  let announcedAt = null;
   const stream = fs.createReadStream(file, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   for await (const line of rl) {
+    if (line.includes('"deferred_tools_delta"')) {
+      try {
+        const row = JSON.parse(line);
+        if (row.attachment && row.attachment.type === 'deferred_tools_delta') {
+          applyToolDelta(announced, row.attachment);
+          announcedAt = Date.parse(row.timestamp) || announcedAt;
+        }
+      } catch {
+        // Malformed line: skip, same as below.
+      }
+      continue;
+    }
+
     // Cheap prefilter: the vast majority of transcript lines carry neither marker,
     // and JSON.parse over ~400MB of them dominates runtime otherwise.
     const hasTool = line.includes('"tool_use"');
@@ -147,7 +196,8 @@ async function scanFile(file) {
       }
     }
   }
-  return buckets;
+  const connectors = announcedAt ? { at: announcedAt, servers: connectorSnapshot(announced) } : null;
+  return { items: buckets, connectors };
 }
 
 function loadCache() {
@@ -165,7 +215,8 @@ function saveCache(cache) {
 }
 
 /**
- * Aggregate every transcript into `{ 'kind|name': { count, first, last, days, projects } }`.
+ * Aggregate every transcript into `{ 'kind|name': { count, first, last, days, projects } }`,
+ * plus the claude.ai connectors the newest session was offered.
  * Results are cached per file by mtime+size, so repeat runs only read new sessions.
  */
 export async function collectUsage({ noCache = false, onProgress } = {}) {
@@ -175,17 +226,25 @@ export async function collectUsage({ noCache = false, onProgress } = {}) {
 
   let scanned = 0;
   for (let i = 0; i < files.length; i++) {
-    const { file, project, sig } = files[i];
+    const { file, project, sig, nested } = files[i];
     const cached = cache.files[file];
     if (cached && cached.sig === sig) {
       next.files[file] = cached;
     } else {
-      next.files[file] = { sig, project, items: await scanFile(file) };
+      next.files[file] = { sig, project, nested, ...(await scanFile(file)) };
       scanned++;
     }
     if (onProgress) onProgress(i + 1, files.length, scanned);
   }
   saveCache(next);
+
+  // The newest top-level session's announcement is what is connected right now.
+  // Subagents get a trimmed tool list, so they don't count.
+  let connectors = null;
+  for (const entry of Object.values(next.files)) {
+    if (entry.nested || !entry.connectors) continue;
+    if (!connectors || entry.connectors.at > connectors.at) connectors = entry.connectors;
+  }
 
   const totals = new Map();
   for (const entry of Object.values(next.files)) {
@@ -202,5 +261,5 @@ export async function collectUsage({ noCache = false, onProgress } = {}) {
       if (entry.project) agg.projects.add(entry.project);
     }
   }
-  return { totals, fileCount: files.length, scanned };
+  return { totals, connectors: connectors ? connectors.servers : {}, fileCount: files.length, scanned };
 }

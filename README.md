@@ -118,7 +118,7 @@ less clean.sh && bash clean.sh
 | ○ `drop` | never used past its grace period, or idle beyond 90 days |
 | ◆ `new` | installed under 14 days ago and not used yet — too early to judge |
 
-Only items you can actually remove yourself are suggested for uninstall. A plugin's usage is the sum of everything it ships (its skills, commands, agents and MCP servers), because a plugin is never invoked directly — so an unused plugin is reported once, not as 142 unused skills.
+Only items you can actually remove yourself are suggested for uninstall, plus idle claude.ai connectors — those print as a `# disconnect … at claude.ai/settings/connectors` comment, since only the web UI can remove them, and `clean` skips them. A plugin's usage is the sum of everything it ships (its skills, commands, agents and MCP servers), because a plugin is never invoked directly — so an unused plugin is reported once, not as 142 unused skills.
 
 `~N tok` is the approximate context each skill or command costs in every session, from the description Claude Code loads into the system prompt. It is the number that makes an unused plugin worth removing.
 
@@ -131,6 +131,7 @@ Only items you can actually remove yourself are suggested for uninstall. A plugi
 | `~/.claude/skills`, `commands`, `agents` | what is installed, and when (symlinks resolved) |
 | `~/.claude/plugins/installed_plugins.json` | plugin install dates and versions |
 | `~/.claude.json` → `mcpServers`, per-project config, plugin `.mcp.json` | configured MCP servers |
+| newest session's announced tool list (`deferred_tools_delta`) | connected claude.ai connectors, incl. unused and never-signed-in ones |
 
 Transcripts are parsed with a line prefilter and cached per file by mtime, so a full 400MB scan takes about a second and repeat runs are near-instant. The cache lives at `~/.claude/.claude-usage-cache.json`; delete it or pass `--no-cache` to rebuild.
 
