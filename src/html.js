@@ -144,7 +144,7 @@ export function renderHtml({ items, now, fileCount }, { kinds, showAll, suggesti
   const visible = [];
   for (const kind of kinds) {
     let group = items.filter((i) => i.kind === kind);
-    if (!showAll) group = group.filter((i) => i.removable || i.count > 0);
+    if (!showAll) group = group.filter((i) => i.removable || i.connected || i.count > 0);
     visible.push(...group);
   }
 

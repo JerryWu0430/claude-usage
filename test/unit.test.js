@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isBuiltinCommand, normalizeMcpServer, parseMcpToolName } from '../src/transcripts.js';
+import {
+  applyToolDelta,
+  connectorSnapshot,
+  isBuiltinCommand,
+  normalizeMcpServer,
+  parseMcpToolName,
+} from '../src/transcripts.js';
 import { DAY, DEFAULTS, verdictFor, weeklyTrend } from '../src/analyze.js';
 import { setColor, sparkline } from '../src/term.js';
 import { ago, compact, shellQuote, truncate } from '../src/format.js';
@@ -27,6 +33,29 @@ test('normalizeMcpServer identifies where a server came from', () => {
   assert.deepEqual(normalizeMcpServer('claude_ai_Linear'), { name: 'Linear', origin: 'connector' });
   assert.deepEqual(normalizeMcpServer('plugin_vercel_vercel'), { name: 'vercel', origin: 'plugin' });
   assert.deepEqual(normalizeMcpServer('datadog'), { name: 'datadog', origin: 'local' });
+});
+
+test('applyToolDelta tracks the tools a session was offered', () => {
+  const names = new Set();
+  applyToolDelta(names, { addedNames: ['Bash', 'mcp__claude_ai_Canva__help'], surfacedNames: ['mcp__claude_ai_Docs__read'] });
+  applyToolDelta(names, { removedNames: ['Bash'], readdedNames: ['Read'] });
+  assert.deepEqual([...names].sort(), ['Read', 'mcp__claude_ai_Canva__help', 'mcp__claude_ai_Docs__read']);
+});
+
+test('connectorSnapshot keeps claude.ai connectors and spots unsigned ones', () => {
+  const snap = connectorSnapshot([
+    'Bash',
+    'mcp__datadog__search_logs',
+    'mcp__claude_ai_Canva__help',
+    'mcp__claude_ai_Canva__create-design',
+    'mcp__claude_ai_Slack__authenticate',
+    'mcp__claude_ai_Slack__complete_authentication',
+  ]);
+  assert.deepEqual(Object.keys(snap).sort(), ['Canva', 'Slack']);
+  assert.equal(snap.Canva.tools, 2);
+  assert.equal(snap.Canva.authed, true);
+  assert.equal(snap.Slack.authed, false);
+  assert.equal(snap.Slack.chars, 'mcp__claude_ai_Slack__authenticate'.length + 'mcp__claude_ai_Slack__complete_authentication'.length);
 });
 
 test('isBuiltinCommand separates shipped commands from installed ones', () => {

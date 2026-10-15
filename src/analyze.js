@@ -69,7 +69,7 @@ export async function analyze(options = {}) {
   const now = opts.now || Date.now();
 
   const inventory = collectInventory();
-  const { totals, fileCount } = await collectUsage(options);
+  const { totals, connectors, fileCount } = await collectUsage(options);
   const ledger = skillLedger();
 
   const items = new Map();
@@ -127,6 +127,13 @@ export async function analyze(options = {}) {
     item.ledger = true;
   }
 
+  // Connected claude.ai connectors, used or not: their tool names sit in every session.
+  for (const [name, info] of Object.entries(connectors)) {
+    let item = items.get(`mcp:${name}`);
+    if (!item) items.set(`mcp:${name}`, (item = orphan('mcp', name, 'connector')));
+    Object.assign(item, { connected: true, authed: info.authed, tools: info.tools, toolChars: info.chars });
+  }
+
   rollUpPlugins(items);
 
   // How far back the transcripts reach — the window in which we could have seen usage.
@@ -144,7 +151,9 @@ export async function analyze(options = {}) {
     item.ageDays = item.installedAt === null ? null : Math.floor((now - item.installedAt) / DAY);
     item.trend = weeklyTrend(item.days, now);
     if (item.kind === 'skill' || item.kind === 'command') item.contextCost = contextCost(item);
+    else if (item.connected) item.contextCost = Math.ceil(item.toolChars / 4);
     else if (item.kind !== 'plugin') item.contextCost = 0;
+    if (item.connected && !item.authed && item.count === 0) item.reason = 'never signed in';
   }
 
   return { items: [...items.values()], now, fileCount, opts, windowDays };
@@ -164,6 +173,7 @@ function orphan(kind, name, mcpOrigin) {
         scope: 'connector',
         removable: false,
         note: 'claude.ai connector — manage at claude.ai/settings/connectors',
+        removeCmd: `# disconnect ${name} at claude.ai/settings/connectors`,
       });
     }
     if (BUILTIN_MCP.has(name)) return base(kind, name, { scope: 'builtin', removable: false, builtin: true });
@@ -231,9 +241,9 @@ function prettyProject(dirName) {
   return dirName.replace(/^-/, '').split('-').pop() || dirName;
 }
 
-/** What to actually uninstall: dead weight you can remove yourself. */
+/** What to actually uninstall: dead weight you can remove yourself, or disconnect on claude.ai. */
 export function suggestions(items) {
   return items
-    .filter((item) => item.verdict === 'drop' && item.removable && item.installed)
+    .filter((item) => item.verdict === 'drop' && ((item.removable && item.installed) || item.connected))
     .sort((a, b) => (b.contextCost - a.contextCost) || (b.idleDays || 1e9) - (a.idleDays || 1e9));
 }
